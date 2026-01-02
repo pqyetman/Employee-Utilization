@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { Card, Form, Row, Col, Badge, Spinner, Alert } from 'react-bootstrap'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { useSubcalendars, useAllEmployeesUtilization } from '../services/teamupService'
@@ -8,7 +8,19 @@ const COLORS = {
   office: '#82ca9d',
   vacation: '#ffc658',
   overtime: '#ff7300',
-  unknown: '#d3d3d3'
+  unknown: '#d3d3d3',
+  'work from home': '#9c88ff',
+  sick: '#ff6b9d',
+  holiday: '#ffc658' // Same color as vacation since they're combined in charts
+}
+
+// Helper function to format dates for tooltip
+const formatDatesForTooltip = (dates) => {
+  if (!dates || dates.length === 0) return 'No dates'
+  return dates.map(d => {
+    const date = new Date(d + 'T00:00:00')
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }).join('\n')
 }
 
 // List of employees to exclude from selection and calculations
@@ -21,6 +33,7 @@ const EXCLUDED_EMPLOYEES = [
 
 function UtilizationChart() {
   const [selectedEmployees, setSelectedEmployees] = useState([])
+  const hasInitialized = useRef(false)
   const [dateRange, setDateRange] = useState(30)
   // Set default custom dates to current month
   const today = new Date()
@@ -32,15 +45,26 @@ function UtilizationChart() {
   const [localStartDate, setLocalStartDate] = useState(firstDayOfMonth.toISOString().split('T')[0])
   const [localEndDate, setLocalEndDate] = useState(lastDayOfMonth.toISOString().split('T')[0])
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' })
+  const [showWarningsOnly, setShowWarningsOnly] = useState(false)
   
   // Calculate date range with memoization
   const { startDate, endDate } = useMemo(() => {
     let start, end
     
     if (dateRange === 'custom') {
-      // Use custom dates
-      start = customStartDate ? new Date(customStartDate) : new Date()
-      end = customEndDate ? new Date(customEndDate) : new Date()
+      // Parse date strings as local dates to avoid timezone issues
+      if (customStartDate) {
+        const [year, month, day] = customStartDate.split('-').map(Number)
+        start = new Date(year, month - 1, day)
+      } else {
+        start = new Date()
+      }
+      if (customEndDate) {
+        const [year, month, day] = customEndDate.split('-').map(Number)
+        end = new Date(year, month - 1, day)
+      } else {
+        end = new Date()
+      }
     } else if (dateRange === 'year-back') {
       // One year back from today
       end = new Date()
@@ -77,6 +101,14 @@ function UtilizationChart() {
       sub => !['Future Work', 'Holidays'].includes(sub.name) && !EXCLUDED_EMPLOYEES.includes(sub.name)
     ) || []
   }, [subcalendars])
+
+  // Initialize selectedEmployees with all employees when employees are first loaded
+  useEffect(() => {
+    if (employees.length > 0 && !hasInitialized.current) {
+      setSelectedEmployees(employees.map(emp => emp.id))
+      hasInitialized.current = true
+    }
+  }, [employees])
 
   // Sorting function
   const sortData = (data, key, direction) => {
@@ -126,6 +158,10 @@ function UtilizationChart() {
           aValue = a.utilization.categories.unknown.weekdays
           bValue = b.utilization.categories.unknown.weekdays
           break
+        case 'holidayDays':
+          aValue = a.utilization.categories.holiday?.weekdays || 0
+          bValue = b.utilization.categories.holiday?.weekdays || 0
+          break
         default:
           return 0
       }
@@ -153,29 +189,55 @@ function UtilizationChart() {
   // All hooks must be called before any conditional returns
   // Filter utilization data based on selected employees
   const filteredData = useMemo(() => {
-    return selectedEmployees.length > 0 
-      ? utilizationData?.filter(item => selectedEmployees.includes(item.employee.id))
-      : utilizationData
+    if (selectedEmployees.length === 0) {
+      return []
+    }
+    return utilizationData?.filter(item => selectedEmployees.includes(item.employee.id)) || []
   }, [selectedEmployees, utilizationData])
 
   // Prepare data for charts function (must be defined before useMemo hooks)
   const prepareChartData = (data) => {
     if (!data || data.length === 0) return []
 
+    // Calculate total days in range (sum of all employees' totalDays)
+    const totalDaysInRange = data.reduce((sum, item) => {
+      return sum + (item.utilization?.totalDays || 0)
+    }, 0)
+
     const aggregated = {
       field: { weekdays: 0, weekends: 0 },
       office: { weekdays: 0, weekends: 0 },
       vacation: { weekdays: 0, weekends: 0 },
+      'work from home': { weekdays: 0, weekends: 0 },
+      sick: { weekdays: 0, weekends: 0 },
       overtime: { weekdays: 0, weekends: 0 },
       unknown: { weekdays: 0, weekends: 0 }
     }
+
+    // Collect all unknown dates from all employees
+    const allUnknownDates = new Set()
+    data.forEach(item => {
+      // Try unknownDates first, then fallback to categoryDates.unknown
+      const dates = item.unknownDates || item.categoryDates?.unknown || []
+      if (Array.isArray(dates)) {
+        dates.forEach(dateStr => {
+          if (dateStr) {
+            allUnknownDates.add(dateStr)
+          }
+        })
+      }
+    })
 
     data.forEach(item => {
       if (item.utilization && item.utilization.categories) {
         Object.keys(item.utilization.categories).forEach(category => {
           const categoryData = item.utilization.categories[category]
           if (categoryData && typeof categoryData.weekdays === 'number' && typeof categoryData.weekends === 'number') {
-            if (aggregated[category]) {
+            if (category === 'holiday') {
+              // Combine holiday with vacation for charts
+              aggregated.vacation.weekdays += categoryData.weekdays
+              aggregated.vacation.weekends += categoryData.weekends
+            } else if (aggregated[category]) {
               aggregated[category].weekdays += categoryData.weekdays
               aggregated[category].weekends += categoryData.weekends
             } else {
@@ -188,19 +250,88 @@ function UtilizationChart() {
       }
     })
 
-    return Object.keys(aggregated).map(category => ({
-      name: category.charAt(0).toUpperCase() + category.slice(1),
-      weekdays: aggregated[category].weekdays,
-      weekends: aggregated[category].weekends,
-      total: aggregated[category].weekdays + aggregated[category].weekends,
-      color: COLORS[category]
-    })).filter(item => item.total > 0)
+    // Build chart data with all categories as distinct items
+    const chartData = [
+      {
+        name: 'Field',
+        weekdays: aggregated.field.weekdays,
+        weekends: aggregated.field.weekends,
+        total: aggregated.field.weekdays + aggregated.field.weekends,
+        color: COLORS.field
+      },
+      {
+        name: 'Office',
+        weekdays: aggregated.office.weekdays,
+        weekends: aggregated.office.weekends,
+        total: aggregated.office.weekdays + aggregated.office.weekends,
+        color: COLORS.office
+      },
+      {
+        name: 'Work From Home',
+        weekdays: aggregated['work from home'].weekdays,
+        weekends: aggregated['work from home'].weekends,
+        total: aggregated['work from home'].weekdays + aggregated['work from home'].weekends,
+        color: COLORS['work from home']
+      },
+      {
+        name: 'Overtime',
+        weekdays: aggregated.overtime.weekdays,
+        weekends: aggregated.overtime.weekends,
+        total: aggregated.overtime.weekdays + aggregated.overtime.weekends,
+        color: COLORS.overtime
+      },
+      {
+        name: 'Vacation',
+        weekdays: aggregated.vacation.weekdays,
+        weekends: aggregated.vacation.weekends,
+        total: aggregated.vacation.weekdays + aggregated.vacation.weekends,
+        color: COLORS.vacation
+      },
+      {
+        name: 'Sick',
+        weekdays: aggregated.sick.weekdays,
+        weekends: aggregated.sick.weekends,
+        total: aggregated.sick.weekdays + aggregated.sick.weekends,
+        color: COLORS.sick
+      },
+      {
+        name: 'Unknown',
+        weekdays: aggregated.unknown.weekdays,
+        weekends: 0, // Unknown only tracks weekdays, weekends should always be 0
+        total: aggregated.unknown.weekdays, // Only count weekdays for unknown
+        color: COLORS.unknown,
+        unknownDates: Array.from(allUnknownDates).sort() // Store unknown dates for tooltip
+      }
+    ].filter(item => {
+      // Keep Unknown even if total is 0, if there are unknown dates
+      if (item.name === 'Unknown' && item.unknownDates && item.unknownDates.length > 0) {
+        return true
+      }
+      return item.total > 0
+    })
+
+    // Calculate percentages against total days in range
+    return chartData.map(item => ({
+      ...item,
+      percentage: totalDaysInRange > 0 ? (item.total / totalDaysInRange * 100) : 0
+    }))
   }
 
-  // Sort the filtered data
+  // Filter by warnings if enabled, then sort the filtered data
   const sortedData = useMemo(() => {
-    return sortData(filteredData, sortConfig.key, sortConfig.direction)
-  }, [filteredData, sortConfig.key, sortConfig.direction])
+    let dataToSort = filteredData
+    
+    // Filter to show only employees with warnings if enabled
+    if (showWarningsOnly) {
+      dataToSort = filteredData.filter(item => {
+        const hasValidationWarning = item.validationInfo && !item.validationInfo.isValid
+        const hasHolidayWarning = item.holidayWarnings && item.holidayWarnings.length > 0
+        return hasValidationWarning || hasHolidayWarning
+      })
+    }
+    
+    return sortData(dataToSort, sortConfig.key, sortConfig.direction)
+  }, [filteredData, sortConfig.key, sortConfig.direction, showWarningsOnly])
 
   // Prepare data for charts
   const chartData = useMemo(() => {
@@ -398,6 +529,17 @@ function UtilizationChart() {
               </Form.Group>
             </Col>
           </Row>
+          <Row className="mb-3">
+            <Col md={6}>
+              <Form.Check
+                type="checkbox"
+                id="show-warnings-only"
+                label="Show only employees with warnings"
+                checked={showWarningsOnly}
+                onChange={(e) => setShowWarningsOnly(e.target.checked)}
+              />
+            </Col>
+          </Row>
         </div>
 
         {/* Employee Selection */}
@@ -446,10 +588,19 @@ function UtilizationChart() {
         </Row>
 
         {/* Charts */}
-        {chartData.length > 0 ? (
+        {selectedEmployees.length === 0 ? (
+          <div className="text-center py-5">
+            <p className="text-muted fs-5">Select One or More Employees For Data</p>
+          </div>
+        ) : chartData.length > 0 ? (
           <Row>
             <Col md={6}>
-              <h6>Utilization Breakdown</h6>
+              <h6 
+                title="Percentages are calculated against the total number of days in the selected date range across all selected employees. Working categories include field work, office time, work from home, and overtime. Non-working categories include vacation, sick, and unknown days."
+                style={{ cursor: 'help' }}
+              >
+                Utilization Breakdown
+              </h6>
               <ResponsiveContainer width="100%" height={300}>
                 <PieChart>
                   <Pie
@@ -457,7 +608,7 @@ function UtilizationChart() {
                     cx="50%"
                     cy="50%"
                     labelLine={false}
-                    label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                    label={({ name, percentage }) => `${name} ${percentage.toFixed(1)}%`}
                     outerRadius={80}
                     fill="#8884d8"
                     dataKey="total"
@@ -466,7 +617,42 @@ function UtilizationChart() {
                       <Cell key={`cell-${index}`} fill={entry.color} />
                     ))}
                   </Pie>
-                  <Tooltip />
+                  <Tooltip 
+                    content={({ active, payload }) => {
+                      if (active && payload && payload.length > 0) {
+                        const data = payload[0].payload
+                        const dates = data.unknownDates
+                        const isUnknown = data.name === 'Unknown'
+                        return (
+                          <div className="bg-white border rounded p-2 shadow" style={{ maxWidth: '300px', zIndex: 1000 }}>
+                            <p className="mb-1"><strong>{data.name}</strong></p>
+                            <p className="mb-0">{data.total} days ({data.percentage.toFixed(1)}%)</p>
+                            {isUnknown && dates && dates.length > 0 && (
+                              <div className="mt-2 pt-2 border-top">
+                                <p className="mb-1 small"><strong>Unknown Dates ({dates.length}):</strong></p>
+                                <div className="small" style={{ maxHeight: '200px', overflowY: 'auto', whiteSpace: 'nowrap' }}>
+                                  {dates.map(dateStr => {
+                                    const date = new Date(dateStr + 'T00:00:00')
+                                    return (
+                                      <div key={dateStr} style={{ marginBottom: '2px' }}>
+                                        {date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                            {isUnknown && (!dates || dates.length === 0) && (
+                              <div className="mt-2 pt-2 border-top">
+                                <p className="mb-0 small text-muted">No unknown dates available</p>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      }
+                      return null
+                    }}
+                  />
                 </PieChart>
               </ResponsiveContainer>
             </Col>
@@ -477,7 +663,47 @@ function UtilizationChart() {
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="name" />
                   <YAxis />
-                  <Tooltip />
+                  <Tooltip 
+                    content={({ active, payload, label }) => {
+                      if (active && payload && payload.length > 0) {
+                        // Find the data entry for this label
+                        const dataEntry = chartData.find(item => item.name === label)
+                        const dates = dataEntry?.unknownDates
+                        const isUnknown = label === 'Unknown'
+                        return (
+                          <div className="bg-white border rounded p-2 shadow" style={{ maxWidth: '300px', zIndex: 1000 }}>
+                            <p className="mb-1"><strong>{label}</strong></p>
+                            {payload.map((entry, index) => (
+                              <p key={index} className="mb-0" style={{ color: entry.color }}>
+                                {entry.name}: {entry.value}
+                              </p>
+                            ))}
+                            {isUnknown && dates && dates.length > 0 && (
+                              <div className="mt-2 pt-2 border-top">
+                                <p className="mb-1 small"><strong>Unknown Dates ({dates.length}):</strong></p>
+                                <div className="small" style={{ maxHeight: '200px', overflowY: 'auto', whiteSpace: 'nowrap' }}>
+                                  {dates.map(dateStr => {
+                                    const date = new Date(dateStr + 'T00:00:00')
+                                    return (
+                                      <div key={dateStr} style={{ marginBottom: '2px' }}>
+                                        {date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                            {isUnknown && (!dates || dates.length === 0) && (
+                              <div className="mt-2 pt-2 border-top">
+                                <p className="mb-0 small text-muted">No unknown dates available</p>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      }
+                      return null
+                    }}
+                  />
                   <Legend />
                   <Bar dataKey="weekdays" fill="#82ca9d" name="Weekdays" />
                   <Bar dataKey="weekends" fill="#ff7300" name="Weekends" />
@@ -492,7 +718,11 @@ function UtilizationChart() {
         )}
 
         {/* Employee Details */}
-        {sortedData && sortedData.length > 0 && (
+        {selectedEmployees.length === 0 ? (
+          <div className="text-center py-4">
+            <p className="text-muted">Select One or More Employees For Data</p>
+          </div>
+        ) : sortedData && sortedData.length > 0 ? (
           <Row className="mt-4">
             <Col>
               <h6>Employee Details</h6>
@@ -621,6 +851,21 @@ function UtilizationChart() {
                         </div>
                       </th>
                       <th 
+                        onClick={() => handleSort('holidayDays')}
+                        style={{ cursor: 'pointer', userSelect: 'none', minWidth: '100px' }}
+                        className="sortable-header"
+                      >
+                        <div className="d-flex justify-content-between align-items-start">
+                          <span className="text-start" style={{ whiteSpace: 'nowrap' }}>Holiday Days</span>
+                          <span style={{ 
+                            fontSize: '14px', 
+                            color: sortConfig.key === 'holidayDays' ? '#007bff' : '#6c757d',
+                            fontWeight: sortConfig.key === 'holidayDays' ? 'bold' : 'normal',
+                            marginLeft: '8px'
+                          }}>{getSortIndicator('holidayDays')}</span>
+                        </div>
+                      </th>
+                      <th 
                         onClick={() => handleSort('overtimeDays')}
                         style={{ cursor: 'pointer', userSelect: 'none', minWidth: '100px' }}
                         className="sortable-header"
@@ -672,11 +917,32 @@ Breakdown:
 • Office: ${item.validationInfo.categoryBreakdown.office} days
 • Work From Home: ${item.validationInfo.categoryBreakdown['work from home']} days
 • Vacation: ${item.validationInfo.categoryBreakdown.vacation} days
+• Holiday: ${item.validationInfo.categoryBreakdown.holiday} days
 • Sick: ${item.validationInfo.categoryBreakdown.sick} days
-• Unknown: ${item.validationInfo.categoryBreakdown.unknown} days`}
+• Unknown: ${item.validationInfo.categoryBreakdown.unknown} days${item.validationInfo.unaccountedDates && item.validationInfo.unaccountedDates.length > 0 ? `
+
+Unaccounted Dates (${item.validationInfo.unaccountedDates.length}):
+${item.validationInfo.unaccountedDates.map(dateStr => {
+                                  const date = new Date(dateStr + 'T00:00:00')
+                                  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                                }).join('\n')}` : ''}`}
                                 style={{ cursor: 'help' }}
                               >
                                 ⚠️
+                              </span>
+                            )}
+                            {item.holidayWarnings && item.holidayWarnings.length > 0 && (
+                              <span 
+                                className="ms-2 text-danger" 
+                                title={`Holiday Warning: Non-field/office events found on holidays (not counted):
+                                
+${item.holidayWarnings.map(warning => {
+                                  const date = new Date(warning.date + 'T00:00:00')
+                                  return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}: ${warning.statuses.join(', ')}`
+                                }).join('\n')}`}
+                                style={{ cursor: 'help' }}
+                              >
+                                🚫
                               </span>
                             )}
                           </div>
@@ -704,31 +970,104 @@ Breakdown:
                           {item.isExcludedFromUtilization ? (
                             <span className="text-muted">N/A</span>
                           ) : (
-                            item.utilization.categories.field.weekdays
+                            <span
+                              title={item.categoryDates?.field && item.categoryDates.field.length > 0
+                                ? `Field days:\n${formatDatesForTooltip(item.categoryDates.field)}`
+                                : 'No field days'
+                              }
+                              style={{ cursor: item.categoryDates?.field && item.categoryDates.field.length > 0 ? 'help' : 'default' }}
+                            >
+                              {item.utilization.categories.field.weekdays}
+                            </span>
                           )}
                         </td>
                         <td>
                           {item.isExcludedFromUtilization ? (
                             <span className="text-muted">N/A</span>
                           ) : (
-                            item.utilization.categories.office.weekdays
+                            <span
+                              title={item.categoryDates?.office && item.categoryDates.office.length > 0
+                                ? `Office days:\n${formatDatesForTooltip(item.categoryDates.office)}`
+                                : 'No office days'
+                              }
+                              style={{ cursor: item.categoryDates?.office && item.categoryDates.office.length > 0 ? 'help' : 'default' }}
+                            >
+                              {item.utilization.categories.office.weekdays}
+                            </span>
                           )}
                         </td>
-                        <td>{item.utilization.categories['work from home']?.weekdays || 0}</td>
-                        <td>{item.utilization.categories.vacation.weekdays}</td>
-                        <td>{item.utilization.categories.sick.weekdays || 0}</td>
+                        <td>
+                          <span
+                            title={item.categoryDates?.['work from home'] && item.categoryDates['work from home'].length > 0
+                              ? `Work from home days:\n${formatDatesForTooltip(item.categoryDates['work from home'])}`
+                              : 'No work from home days'
+                            }
+                            style={{ cursor: item.categoryDates?.['work from home'] && item.categoryDates['work from home'].length > 0 ? 'help' : 'default' }}
+                          >
+                            {item.utilization.categories['work from home']?.weekdays || 0}
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            title={item.categoryDates?.vacation && item.categoryDates.vacation.length > 0
+                              ? `Vacation days:\n${formatDatesForTooltip(item.categoryDates.vacation)}`
+                              : 'No vacation days'
+                            }
+                            style={{ cursor: item.categoryDates?.vacation && item.categoryDates.vacation.length > 0 ? 'help' : 'default' }}
+                          >
+                            {item.utilization.categories.vacation.weekdays}
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            title={item.categoryDates?.sick && item.categoryDates.sick.length > 0
+                              ? `Sick days:\n${formatDatesForTooltip(item.categoryDates.sick)}`
+                              : 'No sick days'
+                            }
+                            style={{ cursor: item.categoryDates?.sick && item.categoryDates.sick.length > 0 ? 'help' : 'default' }}
+                          >
+                            {item.utilization.categories.sick.weekdays || 0}
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            title={item.categoryDates?.holiday && item.categoryDates.holiday.length > 0
+                              ? `Holiday days:\n${formatDatesForTooltip(item.categoryDates.holiday)}`
+                              : 'No holiday days'
+                            }
+                            style={{ cursor: item.categoryDates?.holiday && item.categoryDates.holiday.length > 0 ? 'help' : 'default' }}
+                          >
+                            {item.utilization.categories.holiday?.weekdays || 0}
+                          </span>
+                        </td>
                         <td>
                           {item.isExcludedFromUtilization ? (
                             <span className="text-muted">N/A</span>
                           ) : (
-                            item.utilization.categories.overtime.weekends
+                            <span
+                              title={item.categoryDates?.overtime && item.categoryDates.overtime.length > 0
+                                ? `Overtime days:\n${formatDatesForTooltip(item.categoryDates.overtime)}`
+                                : 'No overtime days'
+                              }
+                              style={{ cursor: item.categoryDates?.overtime && item.categoryDates.overtime.length > 0 ? 'help' : 'default' }}
+                            >
+                              {item.utilization.categories.overtime.weekends}
+                            </span>
                           )}
                         </td>
                         <td>
                           {item.isExcludedFromUtilization ? (
                             <span className="text-muted">N/A</span>
                           ) : (
-                            item.utilization.categories.unknown.weekdays
+                            <span
+                              title={item.unknownDates && item.unknownDates.length > 0 
+                                ? `Unknown dates:\n${formatDatesForTooltip(item.unknownDates)}`
+                                : 'No unknown days'
+                              }
+                              style={{ cursor: item.unknownDates && item.unknownDates.length > 0 ? 'help' : 'default' }}
+                            >
+                              {item.utilization.categories.unknown.weekdays}
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -738,6 +1077,14 @@ Breakdown:
               </div>
             </Col>
           </Row>
+        ) : (
+          <div className="text-center py-4">
+            <p className="text-muted">
+              {showWarningsOnly 
+                ? 'No employees with warnings found for the selected criteria'
+                : 'No employee data available for the selected criteria'}
+            </p>
+          </div>
         )}
       </Card.Body>
     </Card>
