@@ -259,13 +259,6 @@ function calculateEmployeeUtilization(events, startDate, endDate, employeeName =
         categoryDates.overtime.add(dateStr)
       }
     } else {
-      // Remove from unknown weekdays, but don't go below 0
-      // Only remove unknown days for employees who should be tracked
-      if (!excludeFromUnknownDays && utilization.categories.unknown.weekdays > 0) {
-        utilization.categories.unknown.weekdays--
-        categoryDates.unknown.delete(dateStr)
-      }
-      
       // If it's a holiday AND has other events
       if (isHoliday && statusCount > 0) {
         // Check if vacation is present - vacation on holiday should count as holiday, not vacation
@@ -273,27 +266,25 @@ function calculateEmployeeUtilization(events, startDate, endDate, employeeName =
         
         if (hasVacation) {
           // Vacation on holiday - count as holiday, ignore vacation
-          // Remove from unknown
-          if (!excludeFromUnknownDays && utilization.categories.unknown.weekdays > 0) {
-            utilization.categories.unknown.weekdays--
-            categoryDates.unknown.delete(dateStr)
-          }
           // Count as holiday (ignore the vacation status)
           utilization.categories.holiday.weekdays += 1
           categoryDates.holiday.add(dateStr)
+          // Remove from unknown AFTER adding to holiday
+          if (!excludeFromUnknownDays) {
+            categoryDates.unknown.delete(dateStr)
+          }
         } else {
           // Check if any status is "field" or "office"
           const hasFieldOrOffice = uniqueStatuses.some(status => status === 'field' || status === 'office')
           
           if (hasFieldOrOffice) {
             // Count as overtime (working on holiday with field/office)
-            // Remove from unknown
-            if (!excludeFromUnknownDays && utilization.categories.unknown.weekdays > 0) {
-              utilization.categories.unknown.weekdays--
-              categoryDates.unknown.delete(dateStr)
-            }
             utilization.categories.overtime.weekdays += 1
             categoryDates.overtime.add(dateStr)
+            // Remove from unknown AFTER adding to overtime
+            if (!excludeFromUnknownDays) {
+              categoryDates.unknown.delete(dateStr)
+            }
           } else {
             // Non-field/office event on holiday - don't count it, leave as unknown, but track for warning
             // Don't remove from unknown - we're not counting this day
@@ -309,6 +300,10 @@ function calculateEmployeeUtilization(events, startDate, endDate, employeeName =
         // Holiday only - count as holiday
         utilization.categories.holiday.weekdays += 1
         categoryDates.holiday.add(dateStr)
+        // Remove from unknown AFTER adding to holiday
+        if (!excludeFromUnknownDays) {
+          categoryDates.unknown.delete(dateStr)
+        }
       } else if (statusCount > 0) {
         // Regular event processing
         const dayFraction = 1 / statusCount
@@ -331,6 +326,11 @@ function calculateEmployeeUtilization(events, startDate, endDate, employeeName =
             utilization.categories[status].weekdays = dayFraction
           }
         })
+        
+        // Remove from unknown AFTER adding to the appropriate category
+        if (!excludeFromUnknownDays) {
+          categoryDates.unknown.delete(dateStr)
+        }
       }
     }
   })
@@ -347,16 +347,14 @@ function calculateEmployeeUtilization(events, startDate, endDate, employeeName =
     
     // Only add if not already processed (no employee events on this date)
     if (!eventsByDate[dateStr]) {
-      // Remove from unknown
-      if (!excludeFromUnknownDays && utilization.categories.unknown.weekdays > 0) {
-        utilization.categories.unknown.weekdays--
-        categoryDates.unknown.delete(dateStr)
-      }
-      
       // Add as holiday (only if not already counted as overtime)
       if (!categoryDates.overtime.has(dateStr) && !categoryDates.holiday.has(dateStr)) {
         utilization.categories.holiday.weekdays += 1
         categoryDates.holiday.add(dateStr)
+        // Remove from unknown AFTER adding to holiday
+        if (!excludeFromUnknownDays) {
+          categoryDates.unknown.delete(dateStr)
+        }
       }
     }
   })
@@ -389,12 +387,14 @@ function calculateEmployeeUtilization(events, startDate, endDate, employeeName =
       // If not, it's unaccounted for
       if (!assignedDates.has(dateStr)) {
         unaccountedDates.push(dateStr)
-        // Add to unknown category dates and count
+        // Add to unknown category dates
         categoryDates.unknown.add(dateStr)
-        utilization.categories.unknown.weekdays += 1
       }
     }
   })
+
+  // Ensure the unknown count matches the actual number of dates in the Set
+  utilization.categories.unknown.weekdays = categoryDates.unknown.size
 
   // Validate that all weekday categories add up to total weekdays
   const totalWeekdayCategories = 

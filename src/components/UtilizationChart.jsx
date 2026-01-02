@@ -34,6 +34,8 @@ const EXCLUDED_EMPLOYEES = [
 function UtilizationChart() {
   const [selectedEmployees, setSelectedEmployees] = useState([])
   const hasInitialized = useRef(false)
+  const previousSelection = useRef([])
+  const prevShowWarningsOnly = useRef(false)
   const [dateRange, setDateRange] = useState(30)
   // Set default custom dates to current month
   const today = new Date()
@@ -109,6 +111,44 @@ function UtilizationChart() {
       hasInitialized.current = true
     }
   }, [employees])
+
+  // Auto-select employees with warnings when filter is enabled
+  useEffect(() => {
+    if (!utilizationData || !utilizationData.length) return
+
+    // Only act when showWarningsOnly actually changes
+    if (showWarningsOnly && !prevShowWarningsOnly.current) {
+      // Store current selection before filtering
+      setSelectedEmployees(current => {
+        if (previousSelection.current.length === 0 && current.length > 0) {
+          previousSelection.current = [...current]
+        }
+        
+        // Find all employees with warnings
+        const employeesWithWarnings = utilizationData
+          .filter(item => {
+            const hasValidationWarning = item.validationInfo && !item.validationInfo.isValid
+            const hasHolidayWarning = item.holidayWarnings && item.holidayWarnings.length > 0
+            return hasValidationWarning || hasHolidayWarning
+          })
+          .map(item => item.employee.id)
+        
+        // Only update if the selection would change
+        if (employeesWithWarnings.length > 0) {
+          return employeesWithWarnings
+        }
+        return current
+      })
+    } else if (!showWarningsOnly && prevShowWarningsOnly.current) {
+      // Restore previous selection when filter is disabled
+      if (previousSelection.current.length > 0) {
+        setSelectedEmployees(previousSelection.current)
+        previousSelection.current = []
+      }
+    }
+    
+    prevShowWarningsOnly.current = showWarningsOnly
+  }, [showWarningsOnly, utilizationData])
 
   // Sorting function
   const sortData = (data, key, direction) => {
